@@ -26,7 +26,7 @@ jobs:
 
       - name: 📦 Cài thư viện Python
         run: |
-          pip install gspread google-auth playwright
+          pip install -r requirements.txt
 
       - name: 🎭 Cài Playwright Chromium
         run: |
