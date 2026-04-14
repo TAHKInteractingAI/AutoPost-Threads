@@ -1,21 +1,13 @@
 #!/usr/bin/env python3
-# ══════════════════════════════════════════════════════════════════
-#  Threads AutoPost Bot — chạy một lần (dành cho GitHub Actions)
-#  Đọc credentials & session từ biến môi trường (GitHub Secrets)
-# ══════════════════════════════════════════════════════════════════
-
 import os, time, json, base64
 os.environ['TZ'] = 'Asia/Ho_Chi_Minh'
 time.tzset()
 
-# ── CONFIG ─────────────────────────────────────────────────────────
 SHEET_ID   = os.environ.get('SHEET_ID', '1b2Oa3EQGw1QtuIkPz8BMaHV4aBltztJxJjGn15ZxhbA')
 SHEET_NAME = os.environ.get('SHEET_NAME', 'Sheet1')
 THREADS_URL = 'https://www.threads.com'
-
 CREDENTIALS_FILE = '/tmp/credentials.json'
 SESSION_FILE     = '/tmp/threads_session.json'
-# ──────────────────────────────────────────────────────────────────
 
 import subprocess, sys, random
 from datetime import datetime, timedelta
@@ -23,9 +15,7 @@ from datetime import datetime, timedelta
 print(f"⏰ Múi giờ: {time.strftime('%Z %z')}")
 print(f"🕐 Giờ hiện tại: {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}")
 
-# ── Khôi phục file từ GitHub Secrets ──────────────────────────────
 def restore_secrets():
-    # credentials.json
     creds_b64 = os.environ.get('CREDENTIALS_JSON_B64', '')
     if not creds_b64:
         print('❌ Thiếu secret CREDENTIALS_JSON_B64')
@@ -34,7 +24,6 @@ def restore_secrets():
         f.write(base64.b64decode(creds_b64))
     print(f'✅ Khôi phục credentials.json → {CREDENTIALS_FILE}')
 
-    # threads_session.json
     session_b64 = os.environ.get('THREADS_SESSION_B64', '')
     if not session_b64:
         print('❌ Thiếu secret THREADS_SESSION_B64')
@@ -43,7 +32,6 @@ def restore_secrets():
         f.write(base64.b64decode(session_b64))
     print(f'✅ Khôi phục threads_session.json → {SESSION_FILE}')
 
-# ── Google Sheets ──────────────────────────────────────────────────
 def connect_sheet():
     import gspread
     from google.oauth2.service_account import Credentials
@@ -95,7 +83,6 @@ def update_status(sheet, row_num, status, post_id=''):
     sheet.update_cell(row_num, 8, datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
     print(f'   📝 Cập nhật row {row_num}: {status}')
 
-# ── Playwright worker (giống bot.py gốc) ──────────────────────────
 def _write_pw_worker():
     path = '/tmp/pw_worker.py'
     lines = [
@@ -110,6 +97,30 @@ def _write_pw_worker():
         'THREADS_URL  = args["threads_url"]\n',
         '\n',
         'def log(msg): print(msg, flush=True)\n',
+        '\n',
+        'def dismiss_popups(page):\n',
+        '    """Tắt popup/dialog/cookie banner trước khi thao tác"""\n',
+        '    popup_sels = [\n',
+        '        \'button:has-text("Allow")\',\n',
+        '        \'button:has-text("Accept")\',\n',
+        '        \'button:has-text("OK")\',\n',
+        '        \'button:has-text("Đồng ý")\',\n',
+        '        \'button:has-text("Không bây giờ")\',\n',
+        '        \'button:has-text("Not Now")\',\n',
+        '        \'button:has-text("Close")\',\n',
+        '        \'button:has-text("Đóng")\',\n',
+        '        \'[aria-label="Close"]\',\n',
+        '        \'[aria-label="Đóng"]\',\n',
+        '    ]\n',
+        '    for sel in popup_sels:\n',
+        '        try:\n',
+        '            btn = page.locator(sel).first\n',
+        '            if btn.is_visible():\n',
+        '                btn.click()\n',
+        '                log(f"   🚫 Đóng popup: {sel}")\n',
+        '                time.sleep(0.5)\n',
+        '        except:\n',
+        '            pass\n',
         '\n',
         'if not hashtags:\n',
         '    log("ERR:NO_TOPIC")\n',
@@ -147,11 +158,19 @@ def _write_pw_worker():
         '        page.goto(THREADS_URL, wait_until="networkidle", timeout=30000)\n',
         '        time.sleep(random.uniform(1.5, 3.0))\n',
         '\n',
+        '        # ── Log URL & title để debug ──\n',
+        '        log(f"   🔗 URL: {page.url}")\n',
+        '        log(f"   📄 Title: {page.title()}")\n',
+        '\n',
         '        if "login" in page.url:\n',
+        '            page.screenshot(path="/tmp/debug_login.png")\n',
         '            log("ERR:SESSION_EXPIRED")\n',
         '            sys.exit(2)\n',
         '\n',
         '        log("   ✅ Đã đăng nhập")\n',
+        '\n',
+        '        # ── Tắt popup ngay sau khi load ──\n',
+        '        dismiss_popups(page)\n',
         '\n',
         '        compose_clicked = False\n',
         '        for sel in [\'a[href*="/compose"]\', \'[aria-label*="Tạo"]\', \'[aria-label*="Create"]\', \'[aria-label*="New thread"]\']:\n',
@@ -169,6 +188,9 @@ def _write_pw_worker():
         '\n',
         '        time.sleep(random.uniform(2.2, 3.2))\n',
         '\n',
+        '        # ── Tắt popup lần 2 (sau khi mở compose) ──\n',
+        '        dismiss_popups(page)\n',
+        '\n',
         '        text_area = page.locator(\'[contenteditable="true"], div[role="textbox"], textarea\').first\n',
         '        text_area.wait_for(state="visible", timeout=10000)\n',
         '        log("   ⌨️ Đang gõ nội dung...")\n',
@@ -177,6 +199,10 @@ def _write_pw_worker():
         '        page.keyboard.type(content, delay=random.randint(40, 85))\n',
         '        time.sleep(random.uniform(1.2, 2.0))\n',
         '        log("   ✅ Gõ xong nội dung")\n',
+        '\n',
+        '        # ── Screenshot sau khi gõ xong để kiểm tra ──\n',
+        '        page.screenshot(path="/tmp/debug_after_type.png")\n',
+        '        log("   📸 Screenshot: /tmp/debug_after_type.png")\n',
         '\n',
         '        topic      = args.get("topic", "").strip()\n',
         '        topic_text = topic if topic else " ".join([tag.lstrip("#").strip() for tag in hashtags.split() if tag.strip()][:3])\n',
@@ -222,6 +248,11 @@ def _write_pw_worker():
         '            log("   ⚠️ Không tìm thấy ô chủ đề, tiếp tục đăng không có chủ đề")\n',
         '\n',
         '        time.sleep(random.uniform(1.0, 1.8))\n',
+        '\n',
+        '        # ── Screenshot trước khi click Đăng ──\n',
+        '        page.screenshot(path="/tmp/debug_before_post.png")\n',
+        '        log("   📸 Screenshot trước đăng: /tmp/debug_before_post.png")\n',
+        '\n',
         '        posted = False\n',
         '        for sel in [\'[data-testid*="post"]\', \'button:has-text("Đăng")\', \'button:has-text("Post")\', \'[aria-label*="Đăng"]\', \'[aria-label*="Post"]\']:\n',
         '            try:\n',
@@ -235,14 +266,43 @@ def _write_pw_worker():
         '                pass\n',
         '\n',
         '        if not posted:\n',
+        '            page.screenshot(path="/tmp/debug_no_post_btn.png")\n',
         '            log("ERR:NO_POST_BTN")\n',
         '            sys.exit(4)\n',
         '\n',
-        '        time.sleep(4)\n',
+        '        # ── Chờ lâu hơn và xác nhận bài đã đăng ──\n',
+        '        log("   ⏳ Chờ xác nhận bài đăng...")\n',
+        '        time.sleep(8)\n',
+        '\n',
+        '        # Chụp screenshot SAU KHI đăng — quan trọng nhất\n',
+        '        page.screenshot(path="/tmp/debug_after_post.png")\n',
+        '        log(f"   📸 Screenshot sau đăng: /tmp/debug_after_post.png")\n',
+        '        log(f"   🔗 URL sau đăng: {page.url}")\n',
+        '\n',
+        '        # Kiểm tra có dialog lỗi không\n',
+        '        error_sels = [\n',
+        '            \'[role="alert"]\',\n',
+        '            \'div:has-text("Something went wrong")\',\n',
+        '            \'div:has-text("Đã xảy ra lỗi")\',\n',
+        '            \'div:has-text("Try again")\',\n',
+        '        ]\n',
+        '        for err_sel in error_sels:\n',
+        '            try:\n',
+        '                el = page.locator(err_sel).first\n',
+        '                if el.is_visible():\n',
+        '                    log(f"   ❌ Phát hiện lỗi trên trang: {err_sel}")\n',
+        '                    log("ERR:POST_FAILED_UI_ERROR")\n',
+        '                    sys.exit(7)\n',
+        '            except:\n',
+        '                pass\n',
+        '\n',
         '        context.storage_state(path=SESSION_FILE)\n',
         '        post_id = "pw_" + str(int(time.time()))\n',
         '        if "/post/" in page.url or "@" in page.url:\n',
         '            post_id = page.url\n',
+        '            log(f"   ✅ Xác nhận URL bài đăng: {post_id}")\n',
+        '        else:\n',
+        '            log(f"   ⚠️ URL không đổi sau đăng ({page.url}), có thể đã đăng hoặc lỗi")\n',
         '        log(f"OK:{post_id}")\n',
         '        browser.close()\n',
         '\n',
@@ -314,13 +374,12 @@ def process_and_post(sheet, post_data):
     else:
         update_status(sheet, row, 'error')
         print('❌ Đăng bài thất bại!')
-        sys.exit(1)  # Fail rõ ràng để GitHub Actions báo lỗi
+        sys.exit(1)
 
     wait_sec = random.randint(30, 60)
     print(f'   ⏳ Chờ {wait_sec}s trước bài kế tiếp...')
     time.sleep(wait_sec)
 
-# ── MAIN ───────────────────────────────────────────────────────────
 if __name__ == '__main__':
     print('\n🤖 Threads AutoPost Bot (GitHub Actions mode) đang khởi động...')
     restore_secrets()
