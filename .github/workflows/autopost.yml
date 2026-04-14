@@ -1,0 +1,51 @@
+name: Threads AutoPost
+
+on:
+  # Trigger thủ công từ cronjob.com (hoặc bất kỳ HTTP client nào)
+  workflow_dispatch:
+
+  # Backup: GitHub Actions cron tự chạy (UTC+0, 20:00 ICT = 13:00 UTC)
+  # T2=1, T4=3, T6=5 theo cron (0=CN)
+  schedule:
+    - cron: '0 13 * * 1,3,5'
+
+jobs:
+  post:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: ⬇️ Checkout code
+        uses: actions/checkout@v4
+
+      - name: 🐍 Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: 📦 Cài thư viện Python
+        run: |
+          pip install gspread google-auth playwright
+
+      - name: 🎭 Cài Playwright Chromium
+        run: |
+          playwright install chromium
+          playwright install-deps chromium
+
+      - name: 🤖 Chạy bot đăng bài
+        env:
+          SHEET_ID: ${{ secrets.SHEET_ID }}
+          SHEET_NAME: ${{ secrets.SHEET_NAME }}
+          CREDENTIALS_JSON_B64: ${{ secrets.CREDENTIALS_JSON_B64 }}
+          THREADS_SESSION_B64: ${{ secrets.THREADS_SESSION_B64 }}
+        run: |
+          python bot_once.py
+
+      - name: 📸 Upload screenshot nếu lỗi
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: error-screenshot
+          path: /tmp/err_exception.png
+          if-no-files-found: ignore

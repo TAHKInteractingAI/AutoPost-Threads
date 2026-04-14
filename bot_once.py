@@ -1,0 +1,343 @@
+#!/usr/bin/env python3
+# ══════════════════════════════════════════════════════════════════
+#  Threads AutoPost Bot — chạy một lần (dành cho GitHub Actions)
+#  Đọc credentials & session từ biến môi trường (GitHub Secrets)
+# ══════════════════════════════════════════════════════════════════
+
+import os, time, json, base64
+os.environ['TZ'] = 'Asia/Ho_Chi_Minh'
+time.tzset()
+
+# ── CONFIG ─────────────────────────────────────────────────────────
+SHEET_ID   = os.environ.get('SHEET_ID', '1b2Oa3EQGw1QtuIkPz8BMaHV4aBltztJxJjGn15ZxhbA')
+SHEET_NAME = os.environ.get('SHEET_NAME', 'Sheet1')
+THREADS_URL = 'https://www.threads.com'
+
+CREDENTIALS_FILE = '/tmp/credentials.json'
+SESSION_FILE     = '/tmp/threads_session.json'
+# ──────────────────────────────────────────────────────────────────
+
+import subprocess, sys, random
+from datetime import datetime, timedelta
+
+print(f"⏰ Múi giờ: {time.strftime('%Z %z')}")
+print(f"🕐 Giờ hiện tại: {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}")
+
+# ── Khôi phục file từ GitHub Secrets ──────────────────────────────
+def restore_secrets():
+    # credentials.json
+    creds_b64 = os.environ.get('CREDENTIALS_JSON_B64', '')
+    if not creds_b64:
+        print('❌ Thiếu secret CREDENTIALS_JSON_B64')
+        sys.exit(1)
+    with open(CREDENTIALS_FILE, 'wb') as f:
+        f.write(base64.b64decode(creds_b64))
+    print(f'✅ Khôi phục credentials.json → {CREDENTIALS_FILE}')
+
+    # threads_session.json
+    session_b64 = os.environ.get('THREADS_SESSION_B64', '')
+    if not session_b64:
+        print('❌ Thiếu secret THREADS_SESSION_B64')
+        sys.exit(1)
+    with open(SESSION_FILE, 'wb') as f:
+        f.write(base64.b64decode(session_b64))
+    print(f'✅ Khôi phục threads_session.json → {SESSION_FILE}')
+
+# ── Google Sheets ──────────────────────────────────────────────────
+def connect_sheet():
+    import gspread
+    from google.oauth2.service_account import Credentials
+    scopes = [
+        'https://www.googleapis.com/auth/spreadsheets',
+        'https://www.googleapis.com/auth/drive'
+    ]
+    creds = Credentials.from_service_account_file(CREDENTIALS_FILE, scopes=scopes)
+    client = gspread.authorize(creds)
+    return client.open_by_key(SHEET_ID).worksheet(SHEET_NAME)
+
+def get_pending_posts(sheet):
+    records = sheet.get_all_records()
+    now = datetime.now()
+    result = []
+    for i, row in enumerate(records, start=2):
+        status = str(row.get('status', '')).strip().lower()
+        if status in ['done', 'skip', 'error']:
+            continue
+        content = str(row.get('content', '')).strip()
+        if not content:
+            continue
+        scheduled = str(row.get('scheduled_time', '')).strip()
+        should_post = False
+        if not scheduled:
+            should_post = True
+        else:
+            try:
+                scheduled_dt = datetime.strptime(scheduled, '%d/%m/%Y %H:%M')
+                if now >= scheduled_dt - timedelta(minutes=5):
+                    should_post = True
+            except ValueError:
+                print(f'⚠️ Row {i}: Sai định dạng thời gian: {scheduled}')
+        if should_post:
+            result.append({
+                'row': i,
+                'content': content,
+                'image_url': str(row.get('image_url', '')).strip(),
+                'hashtags': str(row.get('hashtags', '')).strip(),
+                'topic': str(row.get('topic', '')).strip(),
+                'scheduled_time': scheduled
+            })
+    return result
+
+def update_status(sheet, row_num, status, post_id=''):
+    sheet.update_cell(row_num, 6, status)
+    if post_id:
+        sheet.update_cell(row_num, 7, post_id)
+    sheet.update_cell(row_num, 8, datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
+    print(f'   📝 Cập nhật row {row_num}: {status}')
+
+# ── Playwright worker (giống bot.py gốc) ──────────────────────────
+def _write_pw_worker():
+    path = '/tmp/pw_worker.py'
+    lines = [
+        'import sys, json, random, time, os\n',
+        'from playwright.sync_api import sync_playwright\n',
+        '\n',
+        'args         = json.loads(os.environ["PW_PAYLOAD"])\n',
+        'content      = args["content"]\n',
+        'image_url    = args.get("image_url", "")\n',
+        'hashtags     = args.get("hashtags", "").strip()\n',
+        'SESSION_FILE = args["session_file"]\n',
+        'THREADS_URL  = args["threads_url"]\n',
+        '\n',
+        'def log(msg): print(msg, flush=True)\n',
+        '\n',
+        'if not hashtags:\n',
+        '    log("ERR:NO_TOPIC")\n',
+        '    sys.exit(6)\n',
+        '\n',
+        'if not os.path.exists(SESSION_FILE):\n',
+        '    log("ERR:NO_SESSION")\n',
+        '    sys.exit(1)\n',
+        '\n',
+        'INIT_SCRIPT = (\n',
+        '    "Object.defineProperty(navigator, \\"webdriver\\", {get: () => undefined});"\n',
+        '    " window.chrome = {runtime: {}, loadTimes: function(){}, csi: function(){}, app: {}};"\n',
+        '    " Object.defineProperty(navigator, \\"plugins\\", {get: () => [1,2,3,4,5]});"\n',
+        '    " Object.defineProperty(navigator, \\"languages\\", {get: () => [\\"vi-VN\\",\\"vi\\",\\"en-US\\",\\"en\\"]});"\n',
+        ')\n',
+        '\n',
+        'with sync_playwright() as p:\n',
+        '    browser = p.chromium.launch(\n',
+        '        headless=True,\n',
+        '        args=["--no-sandbox", "--disable-dev-shm-usage",\n',
+        '              "--disable-blink-features=AutomationControlled",\n',
+        '              "--window-size=1280,800"]\n',
+        '    )\n',
+        '    context = browser.new_context(\n',
+        '        storage_state=SESSION_FILE,\n',
+        '        user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36",\n',
+        '        viewport={"width": 1280, "height": 800},\n',
+        '        locale="vi-VN",\n',
+        '        timezone_id="Asia/Ho_Chi_Minh",\n',
+        '    )\n',
+        '    context.add_init_script(INIT_SCRIPT)\n',
+        '    page = context.new_page()\n',
+        '    try:\n',
+        '        log("   🌐 Mở Threads...")\n',
+        '        page.goto(THREADS_URL, wait_until="networkidle", timeout=30000)\n',
+        '        time.sleep(random.uniform(1.5, 3.0))\n',
+        '\n',
+        '        if "login" in page.url:\n',
+        '            log("ERR:SESSION_EXPIRED")\n',
+        '            sys.exit(2)\n',
+        '\n',
+        '        log("   ✅ Đã đăng nhập")\n',
+        '\n',
+        '        compose_clicked = False\n',
+        '        for sel in [\'a[href*="/compose"]\', \'[aria-label*="Tạo"]\', \'[aria-label*="Create"]\', \'[aria-label*="New thread"]\']:\n',
+        '            try:\n',
+        '                btn = page.locator(sel).first\n',
+        '                btn.wait_for(state="visible", timeout=5000)\n',
+        '                btn.click()\n',
+        '                log(f"   🖱️ Click compose: {sel}")\n',
+        '                compose_clicked = True\n',
+        '                break\n',
+        '            except:\n',
+        '                pass\n',
+        '        if not compose_clicked:\n',
+        '            page.goto(THREADS_URL + "/compose", wait_until="networkidle")\n',
+        '\n',
+        '        time.sleep(random.uniform(2.2, 3.2))\n',
+        '\n',
+        '        text_area = page.locator(\'[contenteditable="true"], div[role="textbox"], textarea\').first\n',
+        '        text_area.wait_for(state="visible", timeout=10000)\n',
+        '        log("   ⌨️ Đang gõ nội dung...")\n',
+        '        text_area.click()\n',
+        '        time.sleep(0.7)\n',
+        '        page.keyboard.type(content, delay=random.randint(40, 85))\n',
+        '        time.sleep(random.uniform(1.2, 2.0))\n',
+        '        log("   ✅ Gõ xong nội dung")\n',
+        '\n',
+        '        topic      = args.get("topic", "").strip()\n',
+        '        topic_text = topic if topic else " ".join([tag.lstrip("#").strip() for tag in hashtags.split() if tag.strip()][:3])\n',
+        '        log(f"   🏷️ Đang thêm chủ đề: {topic_text}")\n',
+        '        page.mouse.wheel(0, 180)\n',
+        '        time.sleep(1.5)\n',
+        '\n',
+        '        topic_clicked = False\n',
+        '        for try_sel in [\'[placeholder*="Thêm chủ đề"]\', \'[placeholder*="chủ đề"]\', \'[aria-label*="chủ đề"]\']:\n',
+        '            try:\n',
+        '                topic_el = page.locator(try_sel).first\n',
+        '                topic_el.wait_for(state="visible", timeout=4000)\n',
+        '                topic_el.click()\n',
+        '                log(f"   ✅ Click bằng selector: {try_sel}")\n',
+        '                topic_clicked = True\n',
+        '                break\n',
+        '            except:\n',
+        '                continue\n',
+        '\n',
+        '        if not topic_clicked:\n',
+        '            try:\n',
+        '                topic_el = page.get_by_text("Thêm chủ đề", exact=True).first\n',
+        '                topic_el.wait_for(state="visible", timeout=8000)\n',
+        '                topic_el.click()\n',
+        '                log("   ✅ Click Thêm chủ đề bằng get_by_text")\n',
+        '                topic_clicked = True\n',
+        '            except:\n',
+        '                pass\n',
+        '\n',
+        '        if topic_clicked:\n',
+        '            time.sleep(random.uniform(0.6, 1.1))\n',
+        '            page.keyboard.type(topic_text, delay=random.randint(45, 90))\n',
+        '            time.sleep(random.uniform(0.8, 1.4))\n',
+        '            try:\n',
+        '                first_suggest = page.locator(\'[role="option"], [role="listitem"]\').first\n',
+        '                first_suggest.wait_for(state="visible", timeout=3000)\n',
+        '                first_suggest.click()\n',
+        '                log("   ✅ Chọn gợi ý đầu tiên")\n',
+        '            except:\n',
+        '                page.keyboard.press("Enter")\n',
+        '                log("   ✅ Nhấn Enter để xác nhận chủ đề")\n',
+        '        else:\n',
+        '            log("   ⚠️ Không tìm thấy ô chủ đề, tiếp tục đăng không có chủ đề")\n',
+        '\n',
+        '        time.sleep(random.uniform(1.0, 1.8))\n',
+        '        posted = False\n',
+        '        for sel in [\'[data-testid*="post"]\', \'button:has-text("Đăng")\', \'button:has-text("Post")\', \'[aria-label*="Đăng"]\', \'[aria-label*="Post"]\']:\n',
+        '            try:\n',
+        '                btn = page.locator(sel).last\n',
+        '                btn.wait_for(state="visible", timeout=4000)\n',
+        '                btn.click(force=True)\n',
+        '                posted = True\n',
+        '                log(f"   🚀 Click Đăng thành công: {sel}")\n',
+        '                break\n',
+        '            except:\n',
+        '                pass\n',
+        '\n',
+        '        if not posted:\n',
+        '            log("ERR:NO_POST_BTN")\n',
+        '            sys.exit(4)\n',
+        '\n',
+        '        time.sleep(4)\n',
+        '        context.storage_state(path=SESSION_FILE)\n',
+        '        post_id = "pw_" + str(int(time.time()))\n',
+        '        if "/post/" in page.url or "@" in page.url:\n',
+        '            post_id = page.url\n',
+        '        log(f"OK:{post_id}")\n',
+        '        browser.close()\n',
+        '\n',
+        '    except Exception as e:\n',
+        '        import traceback\n',
+        '        traceback.print_exc()\n',
+        '        try: page.screenshot(path="/tmp/err_exception.png")\n',
+        '        except: pass\n',
+        '        log(f"ERR:EXCEPTION:{str(e)[:150]}")\n',
+        '        browser.close()\n',
+        '        sys.exit(5)\n',
+    ]
+    with open(path, 'w', encoding='utf-8') as f:
+        f.writelines(lines)
+    return path
+
+def post_to_threads_browser(content, image_url='', hashtags='', topic=''):
+    if not topic or not topic.strip():
+        print('❌ Thiếu topic!')
+        return None
+    if len(content) > 500:
+        content = content[:497] + '...'
+
+    pw_worker = _write_pw_worker()
+    env = os.environ.copy()
+    env['PW_PAYLOAD'] = json.dumps({
+        'content': content,
+        'image_url': image_url,
+        'hashtags': hashtags,
+        'topic': topic,
+        'session_file': SESSION_FILE,
+        'threads_url': THREADS_URL,
+    })
+
+    result = subprocess.run(
+        [sys.executable, pw_worker],
+        capture_output=True, text=True, encoding='utf-8',
+        timeout=180, env=env
+    )
+
+    for line in result.stdout.splitlines():
+        if line.startswith('OK:'):
+            print(f'   ✅ Đăng thành công: {line[3:]}')
+            return line[3:]
+        else:
+            print(line)
+
+    if result.stderr:
+        print('--- stderr ---')
+        print(result.stderr[-1000:])
+    return None
+
+def process_and_post(sheet, post_data):
+    row       = post_data['row']
+    content   = post_data['content']
+    image_url = post_data['image_url']
+    hashtags  = post_data['hashtags']
+    topic     = post_data['topic']
+
+    print(f'\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━')
+    print(f'📌 Xử lý bài post (row {row}):')
+    print(f'   Nội dung: {content[:80]}...' if len(content) > 80 else f'   Nội dung: {content}')
+
+    post_id = post_to_threads_browser(content, image_url, hashtags, topic)
+
+    if post_id:
+        update_status(sheet, row, 'done', str(post_id))
+        print('✅ Đăng bài thành công!')
+    else:
+        update_status(sheet, row, 'error')
+        print('❌ Đăng bài thất bại!')
+        sys.exit(1)  # Fail rõ ràng để GitHub Actions báo lỗi
+
+    wait_sec = random.randint(30, 60)
+    print(f'   ⏳ Chờ {wait_sec}s trước bài kế tiếp...')
+    time.sleep(wait_sec)
+
+# ── MAIN ───────────────────────────────────────────────────────────
+if __name__ == '__main__':
+    print('\n🤖 Threads AutoPost Bot (GitHub Actions mode) đang khởi động...')
+    restore_secrets()
+
+    try:
+        sheet = connect_sheet()
+        posts = get_pending_posts(sheet)
+        if not posts:
+            print('📭 Không có bài nào cần đăng lúc này.')
+            sys.exit(0)
+        print(f'📋 Tìm thấy {len(posts)} bài cần đăng')
+        for post in posts:
+            process_and_post(sheet, post)
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        print(f'❌ Lỗi: {e}')
+        sys.exit(1)
+
+    print(f'\n✅ Hoàn thành lúc {datetime.now().strftime("%d/%m/%Y %H:%M:%S")}')
