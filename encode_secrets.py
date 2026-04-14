@@ -35,6 +35,6 @@ for secret_name, filename in files.items():
 
 print('\n' + '=' * 60)
 print('✅ Xong! Thêm thêm 2 secrets sau (không cần encode):')
-print('   SHEET_ID    = 14KpgBdMYVjBiswkAgC79HeK5JNqyQ_aM-XO8Fmd4PPM')
+print('   SHEET_ID    = 1b2Oa3EQGw1QtuIkPz8BMaHV4aBltztJxJjGn15ZxhbA')
 print('   SHEET_NAME  = Sheet1')
 print('=' * 60)
