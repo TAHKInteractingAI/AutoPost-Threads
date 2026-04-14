@@ -49,7 +49,7 @@ def get_pending_posts(sheet):
     result = []
     for i, row in enumerate(records, start=2):
         status = str(row.get('status', '')).strip().lower()
-        if status in ['done', 'skip', 'error']:
+        if status != 'pending':
             continue
         content = str(row.get('content', '')).strip()
         if not content:
