@@ -42,6 +42,7 @@ jobs:
           name: debug-screenshots
           path: |
             /tmp/debug_after_type.png
+            /tmp/debug_after_image.png
             /tmp/debug_before_post.png
             /tmp/debug_after_post.png
             /tmp/debug_login.png
