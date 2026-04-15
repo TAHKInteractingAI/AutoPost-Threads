@@ -44,7 +44,7 @@ def connect_sheet():
     return client.open_by_key(SHEET_ID).worksheet(SHEET_NAME)
 
 def get_pending_posts(sheet):
-    records = sheet.get_all_records()
+    records = sheet.get_all_records(expected_headers=['content', 'image_url', 'hashtags', 'topic', 'scheduled_time', 'status'])
     now = datetime.now()
     result = []
     for i, row in enumerate(records, start=2):
